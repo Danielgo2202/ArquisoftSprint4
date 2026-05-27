@@ -1,0 +1,401 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<jmeterTestPlan version="1.2" properties="4.0" jmeter="4.0 r1823414">
+  <hashTree>
+    <TestPlan guiclass="TestPlanGui" testclass="TestPlan"
+              testname="BITE.co – ASR19 Security Experiment (Rate Limiting Trade-off)" enabled="true">
+      <stringProp name="TestPlan.comments">
+        ASR19 – Security Experiment: Rate Limiting Trade-off
+
+        Measures the effect of RateLimitMiddleware on POST /projects in manejador_cloud.
+        Rate limiter: Redis sliding window — 20 req / 10 s per client IP (configurable).
+        Two phases, two thread groups — run one at a time.
+
+        ================================================================
+        HOW TO RUN:
+
+        Phase 1 – Baseline WITHOUT rate limiting (ENABLE TG1, DISABLE TG2):
+          SSH to manejador_cloud EC2:
+            ssh -i &lt;key.pem&gt; ubuntu@&lt;cloud_ec2_ip&gt;
+            sudo pkill -f "uvicorn main:app" || true; sleep 1
+            cd /opt/biteco/manejador_cloud
+            AUTH_DISABLED=true RATE_LIMIT_ENABLED=false \
+              nohup uvicorn main:app --host 0.0.0.0 --port 8002 --workers 4 \
+              &gt; /tmp/manejador_cloud.log 2&gt;&amp;1 &amp;
+            sleep 3 &amp;&amp; curl -s http://localhost:8002/health
+
+          Run from JMeter machine (ENABLE Thread Group 1, DISABLE Thread Group 2):
+            jmeter -n -t experiments/security_test.jmx \
+              -l results/asr19_baseline.jtl \
+              -e -o results/asr19_baseline_report \
+              -JALB_HOST=bite2-alb-409016959.us-east-1.elb.amazonaws.com
+
+        Phase 2 – WITH rate limiting (DISABLE TG1, ENABLE TG2):
+          SSH to manejador_cloud EC2:
+            ssh -i &lt;key.pem&gt; ubuntu@&lt;cloud_ec2_ip&gt;
+            sudo pkill -f "uvicorn main:app" || true; sleep 1
+            cd /opt/biteco/manejador_cloud
+            AUTH_DISABLED=true RATE_LIMIT_ENABLED=true \
+              RATE_LIMIT_REQUESTS=20 RATE_LIMIT_WINDOW=10 \
+              nohup uvicorn main:app --host 0.0.0.0 --port 8002 --workers 4 \
+              &gt; /tmp/manejador_cloud.log 2&gt;&amp;1 &amp;
+            sleep 3 &amp;&amp; curl -s http://localhost:8002/health
+
+          Run from JMeter machine (DISABLE Thread Group 1, ENABLE Thread Group 2):
+            jmeter -n -t experiments/security_test.jmx \
+              -l results/asr19_protected.jtl \
+              -e -o results/asr19_protected_report \
+              -JALB_HOST=bite2-alb-409016959.us-east-1.elb.amazonaws.com
+
+        After Phase 2, count blocked vs allowed:
+          grep ",201," results/asr19_phase2_codes.csv | wc -l   # allowed
+          grep ",429," results/asr19_phase2_codes.csv | wc -l   # blocked
+          # blocked% = blocked / (blocked + allowed) * 100  — target: >= 90%
+
+        Compare P95, average latency, and % of 429 responses between phases.
+        Document the latency vs security trade-off (P95 of 201 responses in Phase 2
+        must still be &lt;= 500 ms to confirm legitimate users are not degraded).
+        ================================================================
+      </stringProp>
+      <boolProp name="TestPlan.functional_mode">false</boolProp>
+      <boolProp name="TestPlan.tearDown_on_shutdown">true</boolProp>
+      <!-- serialize=true so TG1 and TG2 don't run simultaneously -->
+      <boolProp name="TestPlan.serialize_threadgroups">true</boolProp>
+      <elementProp name="TestPlan.arguments" elementType="Arguments" guiclass="ArgumentsPanel"
+                   testclass="Arguments" testname="User Defined Variables" enabled="true">
+        <collectionProp name="Arguments.arguments">
+          <!-- Override at runtime: -JALB_HOST=bite2-alb-XXXXXXX.us-east-1.elb.amazonaws.com -->
+          <elementProp name="ALB_HOST" elementType="Argument">
+            <stringProp name="Argument.name">ALB_HOST</stringProp>
+            <stringProp name="Argument.value">${__P(ALB_HOST,localhost)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+        </collectionProp>
+      </elementProp>
+    </TestPlan>
+    <hashTree>
+
+      <!-- ================================================================ -->
+      <!-- setUp: Authenticate and store JWT for both thread groups         -->
+      <!-- ================================================================ -->
+      <SetupThreadGroup guiclass="SetupThreadGroupGui" testclass="SetupThreadGroup"
+                        testname="setUp – Obtain JWT Token" enabled="true">
+        <!-- continue: AUTH_DISABLED=true on manejador_cloud means JWT is not
+             validated — a fallback bypass token is set if auth is unreachable -->
+        <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController"
+                     guiclass="LoopControlPanel" testclass="LoopController" enabled="true">
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+          <intProp name="LoopController.loops">1</intProp>
+        </elementProp>
+        <stringProp name="ThreadGroup.num_threads">1</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">1</stringProp>
+      </SetupThreadGroup>
+      <hashTree>
+        <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager"
+                       testname="JSON Header" enabled="true">
+          <collectionProp name="HeaderManager.headers">
+            <elementProp name="" elementType="Header">
+              <stringProp name="Header.name">Content-Type</stringProp>
+              <stringProp name="Header.value">application/json</stringProp>
+            </elementProp>
+          </collectionProp>
+        </HeaderManager>
+        <hashTree/>
+
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy"
+                          testname="POST /auth/login" enabled="true">
+          <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables" enabled="true">
+            <collectionProp name="Arguments.arguments">
+              <elementProp name="" elementType="HTTPArgument">
+                <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                <stringProp name="Argument.value">{"email":"empresa_a@bite.co","password":"BiteCo2024!"}</stringProp>
+                <stringProp name="Argument.metadata">=</stringProp>
+              </elementProp>
+            </collectionProp>
+          </elementProp>
+          <stringProp name="HTTPSampler.domain">${__P(ALB_HOST,localhost)}</stringProp>
+          <stringProp name="HTTPSampler.port">443</stringProp>
+          <stringProp name="HTTPSampler.protocol">https</stringProp>
+          <stringProp name="HTTPSampler.path">/auth/login</stringProp>
+          <stringProp name="HTTPSampler.method">POST</stringProp>
+          <boolProp name="HTTPSampler.follow_redirects">false</boolProp>
+          <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+          <intProp name="HTTPSampler.connect_timeout">10000</intProp>
+          <intProp name="HTTPSampler.response_timeout">10000</intProp>
+        </HTTPSamplerProxy>
+        <hashTree>
+          <!-- Extract and promote jwt_token variable to a global property using Groovy -->
+          <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor"
+                               testname="Extract and Promote JWT" enabled="true">
+            <stringProp name="scriptLanguage">groovy</stringProp>
+            <stringProp name="script">import groovy.json.JsonSlurper
+
+// AUTH_DISABLED=true on manejador_cloud — JWT is not validated.
+// Fall back to a bypass token so the test runs even if auth service is down.
+def response = prev.getResponseDataAsString()
+try {
+    def json = new JsonSlurper().parseText(response)
+    def token = json.access_token
+    if (token) {
+        props.put("jwt_token", token)
+        log.info("JWT extracted: " + token.take(20) + "...")
+    } else {
+        props.put("jwt_token", "AUTH_DISABLED_BYPASS")
+        log.warn("access_token not found — using AUTH_DISABLED_BYPASS token")
+    }
+} catch (Exception e) {
+    props.put("jwt_token", "AUTH_DISABLED_BYPASS")
+    log.warn("Auth login failed (" + e.getMessage() + ") — using AUTH_DISABLED_BYPASS token")
+}
+</stringProp>
+          </JSR223PostProcessor>
+          <hashTree/>
+        </hashTree>
+      </hashTree>
+
+      <!-- ================================================================ -->
+      <!-- Thread Group 1: Phase 1 — Baseline (20 users, no rate limit)    -->
+      <!-- ENABLE this group / DISABLE Group 2 for Phase 1                 -->
+      <!-- Expected: ~100% HTTP 201, low latency overhead                  -->
+      <!-- ================================================================ -->
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup"
+                   testname="Phase 1 – Baseline 20 Users (no rate limit)" enabled="true">
+        <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController"
+                     guiclass="LoopControlPanel" testclass="LoopController" enabled="true">
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+          <intProp name="LoopController.loops">10</intProp>
+        </elementProp>
+        <stringProp name="ThreadGroup.num_threads">20</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">15</stringProp>
+        <boolProp name="ThreadGroup.scheduler">false</boolProp>
+        <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
+      </ThreadGroup>
+      <hashTree>
+
+        <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager"
+                       testname="HTTP Headers – Phase 1" enabled="true">
+          <collectionProp name="HeaderManager.headers">
+            <elementProp name="" elementType="Header">
+              <stringProp name="Header.name">Content-Type</stringProp>
+              <stringProp name="Header.value">application/json</stringProp>
+            </elementProp>
+            <elementProp name="" elementType="Header">
+              <stringProp name="Header.name">Accept</stringProp>
+              <stringProp name="Header.value">application/json</stringProp>
+            </elementProp>
+            <elementProp name="" elementType="Header">
+              <stringProp name="Header.name">Authorization</stringProp>
+              <stringProp name="Header.value">Bearer ${__P(jwt_token,TOKEN_NOT_FOUND)}</stringProp>
+            </elementProp>
+          </collectionProp>
+        </HeaderManager>
+        <hashTree/>
+
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy"
+                          testname="POST /projects – Phase 1" enabled="true">
+          <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables" enabled="true">
+            <collectionProp name="Arguments.arguments">
+              <elementProp name="" elementType="HTTPArgument">
+                <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                <stringProp name="Argument.value">{"nombre":"Proyecto Optimización AWS - Q1 2025","descripcion":"Proyecto de reducción de costos cloud para el primer trimestre. Incluye análisis de instancias EC2 infrautilizadas, optimización de buckets S3 y revisión de bases de datos RDS.","empresa_id":"550e8400-e29b-41d4-a716-446655440001","cuentas_cloud":["550e8400-e29b-41d4-a716-446655440011","550e8400-e29b-41d4-a716-446655440012"],"presupuesto":{"monto_mensual":"8500.00","moneda":"USD","alerta_porcentaje":80}}</stringProp>
+                <stringProp name="Argument.metadata">=</stringProp>
+              </elementProp>
+            </collectionProp>
+          </elementProp>
+          <stringProp name="HTTPSampler.domain">${__P(ALB_HOST,localhost)}</stringProp>
+          <stringProp name="HTTPSampler.port">443</stringProp>
+          <stringProp name="HTTPSampler.protocol">https</stringProp>
+          <stringProp name="HTTPSampler.path">/projects</stringProp>
+          <stringProp name="HTTPSampler.method">POST</stringProp>
+          <boolProp name="HTTPSampler.follow_redirects">false</boolProp>
+          <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+          <intProp name="HTTPSampler.connect_timeout">10000</intProp>
+          <intProp name="HTTPSampler.response_timeout">10000</intProp>
+        </HTTPSamplerProxy>
+        <hashTree>
+
+          <!-- Phase 1: assert 201 — all requests should succeed -->
+          <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion"
+                             testname="Assert HTTP 201 – baseline" enabled="true">
+            <collectionProp name="Assertion.test_strings">
+              <stringProp name="49586">201</stringProp>
+            </collectionProp>
+            <stringProp name="Assertion.custom_message">Phase 1 baseline: expected HTTP 201 with no rate limiting</stringProp>
+            <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+            <boolProp name="Assertion.assume_success">false</boolProp>
+            <intProp name="Assertion.test_type">8</intProp>
+          </ResponseAssertion>
+          <hashTree/>
+
+          <!-- Phase 1 latency baseline -->
+          <DurationAssertion guiclass="DurationAssertionGui" testclass="DurationAssertion"
+                             testname="Assert Duration ≤ 500ms – baseline" enabled="true">
+            <longProp name="DurationAssertion.duration">500</longProp>
+          </DurationAssertion>
+          <hashTree/>
+
+        </hashTree>
+
+        <ResultCollector guiclass="StatVisualizer" testclass="ResultCollector"
+                         testname="Aggregate Report – Phase 1 Baseline" enabled="true">
+          <boolProp name="ResultCollector.error_logging">false</boolProp>
+          <objProp>
+            <name>saveConfig</name>
+            <value class="SampleSaveConfiguration">
+              <time>true</time><latency>true</latency><timestamp>true</timestamp>
+              <success>true</success><label>true</label><code>true</code>
+              <message>true</message><fieldNames>true</fieldNames>
+              <bytes>true</bytes><sentBytes>true</sentBytes><url>true</url>
+              <threadCounts>true</threadCounts><connectTime>true</connectTime>
+            </value>
+          </objProp>
+          <stringProp name="filename">results/asr19_phase1_aggregate.csv</stringProp>
+        </ResultCollector>
+        <hashTree/>
+
+        <ResultCollector guiclass="SummaryReport" testclass="ResultCollector"
+                         testname="Summary Report – Phase 1 Baseline" enabled="true">
+          <boolProp name="ResultCollector.error_logging">false</boolProp>
+          <objProp>
+            <name>saveConfig</name>
+            <value class="SampleSaveConfiguration">
+              <time>true</time><latency>true</latency><timestamp>true</timestamp>
+              <success>true</success><label>true</label><code>true</code>
+              <message>true</message><fieldNames>true</fieldNames>
+            </value>
+          </objProp>
+          <stringProp name="filename">results/asr19_phase1_summary.csv</stringProp>
+        </ResultCollector>
+        <hashTree/>
+
+      </hashTree>
+
+      <!-- ================================================================ -->
+      <!-- Thread Group 2: Phase 2 — Attack simulation (150 users, RL ON)  -->
+      <!-- DISABLE Group 1 / ENABLE this group for Phase 2                 -->
+      <!-- Expected: mix of HTTP 201 (legitimate) and 429 (rate limited)   -->
+      <!-- NO response code assertion — results are intentionally mixed     -->
+      <!-- ================================================================ -->
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup"
+                   testname="Phase 2 – Attack 150 Users (rate limit enabled)" enabled="false">
+        <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController"
+                     guiclass="LoopControlPanel" testclass="LoopController" enabled="true">
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+          <intProp name="LoopController.loops">5</intProp>
+        </elementProp>
+        <stringProp name="ThreadGroup.num_threads">150</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">15</stringProp>
+        <boolProp name="ThreadGroup.scheduler">false</boolProp>
+        <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
+      </ThreadGroup>
+      <hashTree>
+
+        <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager"
+                       testname="HTTP Headers – Phase 2" enabled="true">
+          <collectionProp name="HeaderManager.headers">
+            <elementProp name="" elementType="Header">
+              <stringProp name="Header.name">Content-Type</stringProp>
+              <stringProp name="Header.value">application/json</stringProp>
+            </elementProp>
+            <elementProp name="" elementType="Header">
+              <stringProp name="Header.name">Accept</stringProp>
+              <stringProp name="Header.value">application/json</stringProp>
+            </elementProp>
+            <elementProp name="" elementType="Header">
+              <stringProp name="Header.name">Authorization</stringProp>
+              <stringProp name="Header.value">Bearer ${__P(jwt_token,TOKEN_NOT_FOUND)}</stringProp>
+            </elementProp>
+          </collectionProp>
+        </HeaderManager>
+        <hashTree/>
+
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy"
+                          testname="POST /projects – Phase 2" enabled="true">
+          <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables" enabled="true">
+            <collectionProp name="Arguments.arguments">
+              <elementProp name="" elementType="HTTPArgument">
+                <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                <stringProp name="Argument.value">{"nombre":"Proyecto Optimización AWS - Q1 2025","descripcion":"Proyecto de reducción de costos cloud para el primer trimestre. Incluye análisis de instancias EC2 infrautilizadas, optimización de buckets S3 y revisión de bases de datos RDS.","empresa_id":"550e8400-e29b-41d4-a716-446655440001","cuentas_cloud":["550e8400-e29b-41d4-a716-446655440011","550e8400-e29b-41d4-a716-446655440012"],"presupuesto":{"monto_mensual":"8500.00","moneda":"USD","alerta_porcentaje":80}}</stringProp>
+                <stringProp name="Argument.metadata">=</stringProp>
+              </elementProp>
+            </collectionProp>
+          </elementProp>
+          <stringProp name="HTTPSampler.domain">${__P(ALB_HOST,localhost)}</stringProp>
+          <stringProp name="HTTPSampler.port">443</stringProp>
+          <stringProp name="HTTPSampler.protocol">https</stringProp>
+          <stringProp name="HTTPSampler.path">/projects</stringProp>
+          <stringProp name="HTTPSampler.method">POST</stringProp>
+          <boolProp name="HTTPSampler.follow_redirects">false</boolProp>
+          <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+          <intProp name="HTTPSampler.connect_timeout">10000</intProp>
+          <intProp name="HTTPSampler.response_timeout">10000</intProp>
+        </HTTPSamplerProxy>
+        <hashTree>
+          <!-- NO response code assertion here — we expect mixed 201/429 -->
+          <!-- The Aggregate Report will show the % breakdown             -->
+        </hashTree>
+
+        <!-- Aggregate Report: shows P95, P99, error%, response codes -->
+        <ResultCollector guiclass="StatVisualizer" testclass="ResultCollector"
+                         testname="Aggregate Report – Phase 2 Attack" enabled="true">
+          <boolProp name="ResultCollector.error_logging">false</boolProp>
+          <objProp>
+            <name>saveConfig</name>
+            <value class="SampleSaveConfiguration">
+              <time>true</time><latency>true</latency><timestamp>true</timestamp>
+              <success>true</success><label>true</label><code>true</code>
+              <message>true</message><fieldNames>true</fieldNames>
+              <bytes>true</bytes><sentBytes>true</sentBytes><url>true</url>
+              <threadCounts>true</threadCounts><connectTime>true</connectTime>
+            </value>
+          </objProp>
+          <stringProp name="filename">results/asr19_phase2_aggregate.csv</stringProp>
+        </ResultCollector>
+        <hashTree/>
+
+        <!-- Summary Report: overall pass/fail rates per response code -->
+        <ResultCollector guiclass="SummaryReport" testclass="ResultCollector"
+                         testname="Summary Report – Phase 2 Attack" enabled="true">
+          <boolProp name="ResultCollector.error_logging">false</boolProp>
+          <objProp>
+            <name>saveConfig</name>
+            <value class="SampleSaveConfiguration">
+              <time>true</time><latency>true</latency><timestamp>true</timestamp>
+              <success>true</success><label>true</label><code>true</code>
+              <message>true</message><fieldNames>true</fieldNames>
+            </value>
+          </objProp>
+          <stringProp name="filename">results/asr19_phase2_summary.csv</stringProp>
+        </ResultCollector>
+        <hashTree/>
+
+        <!-- Raw response code log — use to count 201 vs 429 separately -->
+        <!-- Filter with: grep ",201," results/asr19_phase2_codes.csv | wc -l -->
+        <!-- Filter with: grep ",429," results/asr19_phase2_codes.csv | wc -l -->
+        <ResultCollector guiclass="SimpleDataWriter" testclass="ResultCollector"
+                         testname="Response Code Log – Phase 2" enabled="true">
+          <boolProp name="ResultCollector.error_logging">false</boolProp>
+          <objProp>
+            <name>saveConfig</name>
+            <value class="SampleSaveConfiguration">
+              <time>true</time><latency>true</latency><timestamp>true</timestamp>
+              <success>true</success><label>true</label><code>true</code>
+              <message>true</message><fieldNames>true</fieldNames>
+              <bytes>false</bytes><sentBytes>false</sentBytes><url>false</url>
+              <threadCounts>true</threadCounts>
+            </value>
+          </objProp>
+          <stringProp name="filename">results/asr19_phase2_codes.csv</stringProp>
+        </ResultCollector>
+        <hashTree/>
+
+      </hashTree>
+
+    </hashTree>
+  </hashTree>
+</jmeterTestPlan>
