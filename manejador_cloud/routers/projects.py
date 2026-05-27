@@ -1,12 +1,4 @@
-"""
-POST /projects  — create a cloud project with validated cloud accounts.
-GET  /projects  — list projects for the current tenant (empresa_id).
 
-Architecture note (ASR16):
-  Validation of cuentas_cloud is a local DB query on the CQRS read replica,
-  eliminating the inter-service HTTP hop that previously added ~50–150 ms to
-  every POST /projects in manejador_usuarios.
-"""
 import logging
 from typing import List
 
@@ -32,12 +24,7 @@ def create_project(
     db: Session = Depends(get_write_db),
     tenant_id: str = Depends(get_current_tenant),
 ):
-    """
-    Create a project and associate the requested cloud accounts.
 
-    Validates that every cuenta_cloud_id exists and is active before
-    persisting — pure local DB read, no HTTP hop to manejador_usuarios.
-    """
     cuenta_ids = [str(cid) for cid in payload.cuentas_cloud]
 
     # Validate all requested cloud accounts (read replica — fast path)
@@ -76,9 +63,8 @@ def create_project(
         activo=True,
     )
     db.add(nuevo)
-    db.flush()  # populate nuevo.id before updating cuentas
+    db.flush() 
 
-    # Associate cloud accounts with this project
     for cuenta in db.query(models.CuentaCloud).filter(
         models.CuentaCloud.id.in_(cuenta_ids)
     ).all():
@@ -109,10 +95,7 @@ def list_projects(
     db: Session = Depends(get_read_db),
     tenant_id: str = Depends(get_current_tenant),
 ):
-    """
-    Return the 50 most-recent active projects for the authenticated tenant.
-    Reads from the CQRS read replica for low latency.
-    """
+
     proyectos = (
         db.query(models.Proyecto)
         .filter(

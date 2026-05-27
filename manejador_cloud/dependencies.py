@@ -11,12 +11,7 @@ logger = logging.getLogger(__name__)
 security = HTTPBearer(auto_error=False)
 
 def get_current_tenant(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
-    """
-    FastAPI dependency equivalent to TenantAuthMiddleware.
-    Validates token via auth service or locally on fallback.
-    Returns the tenant UUID string.
-    """
-    # AUTH_DISABLED=true bypasses all token validation (load testing / dev mode)
+    
     if os.getenv("AUTH_DISABLED", "false").lower() == "true":
         logger.warning("AUTH_DISABLED=true — skipping token validation")
         return os.getenv("AUTH_DISABLED_TENANT", "550e8400-e29b-41d4-a716-446655440001")
@@ -40,7 +35,6 @@ def get_current_tenant(credentials: HTTPAuthorizationCredentials = Depends(secur
             return resp.json().get('empresa_id')
     except requests.RequestException as e:
         logger.warning("Auth service unreachable: %s — falling back to local validation", e)
-        # fallback locally
         local_secret = settings.LOCAL_JWT_SECRET
         if local_secret:
             try:

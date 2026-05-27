@@ -29,7 +29,6 @@ except Exception as e:
 
 Base = declarative_base()
 
-# FastAPI Dependencies
 def get_write_db():
     db = SessionLocalWrite()
     try:
