@@ -276,5 +276,3 @@ Seguridad               → (future service):      EventoSeguridad, RegistroAudi
 3. `ResourceServiceClient` uses **fail-open** policy (if `manejador_cloud` is down, validation passes) to prioritize availability.
 4. Email uses `console` backend in development. Set `EMAIL_HOST_PASSWORD` for SendGrid/SES in production.
 5. `initial_providers.json` fixture seeds AWS and GCP `ProveedorCloud` records on first deploy.
-#   A r q u i s o f t S p r i n t 4  
- 
